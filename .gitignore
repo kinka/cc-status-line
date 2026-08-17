@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# 运行时额度缓存
+cliproxy-quota.json
+cliproxy-quota.json.tmp
+
+# 管理密钥和本地配置
+.cliproxy-mgmt-key
+.earnrmb-mgmt-key
+*.key
+.env
+.env.*
+
+# 安装脚本产生的备份
+*.bak.*
