@@ -215,7 +215,13 @@ if [ -n "$_PROV" ]; then
         while IFS="$(printf '\037')" read -r _ae _au _ar; do
           [ -z "$_ae" ] && continue
           _al=$(printf '%s' "$_ae" | cut -d'@' -f1 | cut -c1-8)
-          cliproxy_detail="${cliproxy_detail}  ${MUTED}${_al}${RESET}$(usage_seg_weak 'wk:' "$_au" "$_ar")"
+          _account_seg="${MUTED}${_al}${RESET}$(usage_seg_weak 'wk:' "$_au" "$_ar")"
+          if [ -n "$cliproxy_detail" ]; then
+            cliproxy_detail="${cliproxy_detail}
+${_account_seg}"
+          else
+            cliproxy_detail="$_account_seg"
+          fi
         done <<EOF
 $_acc_tsv
 EOF
@@ -241,7 +247,13 @@ EOF
         while IFS="$(printf '\037')" read -r _ae _aw5u _aw5r _aw7u _aw7r; do
           [ -z "$_ae" ] && continue
           _al=$(printf '%s' "$_ae" | cut -d'@' -f1 | cut -c1-8)
-          cliproxy_detail="${cliproxy_detail}  ${MUTED}${_al}${RESET}$(usage_seg_weak '5h:' "$_aw5u" "$_aw5r")$(usage_seg_weak '7d:' "$_aw7u" "$_aw7r")"
+          _account_seg="${MUTED}${_al}${RESET}$(usage_seg_weak '5h:' "$_aw5u" "$_aw5r")$(usage_seg_weak '7d:' "$_aw7u" "$_aw7r")"
+          if [ -n "$cliproxy_detail" ]; then
+            cliproxy_detail="${cliproxy_detail}
+${_account_seg}"
+          else
+            cliproxy_detail="$_account_seg"
+          fi
         done <<EOF
 $_acc_tsv
 EOF
@@ -256,6 +268,41 @@ EOF
 fi
 
 # Compose output: user  path  [git]  model  [time]  ctx | 官方额度 | CLIProxyAPI逐账户额度
-# 有可用账户时直接拼在同一行末尾;不再显示池总览/账号数,账户名用邮箱前缀缩写。
-printf "${BOLD}${WHITE}%s${RESET} ${BOLD}${WHITE}%s${RESET}${GREEN}%s${RESET}  ${CYAN}%s${RESET}  [%s]%s%s%s%s\n" \
-  "$user" "$display_path" "$git_status_str" "$model" "$time_str" "$ctx_str" "$quota_str" "$cliproxy_str" "$cliproxy_detail"
+# 账户在终端宽度内保持同一行;超宽时只在账户边界换行,不拆散单个账户的额度窗口。
+_base_line=$(printf "${BOLD}${WHITE}%s${RESET} ${BOLD}${WHITE}%s${RESET}${GREEN}%s${RESET}  ${CYAN}%s${RESET}  [%s]%s%s%s" \
+  "$user" "$display_path" "$git_status_str" "$model" "$time_str" "$ctx_str" "$quota_str" "$cliproxy_str")
+
+# 优先使用继承的 COLUMNS,否则从控制终端读取;非交互环境回退到 120 列。
+terminal_cols=${COLUMNS:-}
+case "$terminal_cols" in ''|*[!0-9]*) terminal_cols="" ;; esac
+if [ -z "$terminal_cols" ]; then
+  _terminal_size=$(stty size </dev/tty 2>/dev/null || true)
+  terminal_cols=${_terminal_size##* }
+fi
+case "$terminal_cols" in ''|*[!0-9]*) terminal_cols=120 ;; esac
+[ "$terminal_cols" -lt 40 ] && terminal_cols=40
+
+visible_length() {
+  _plain=$(printf '%s' "$1" | sed "s/${ESC}\\[[0-9;]*m//g")
+  printf '%s' "$_plain" | wc -m | tr -d ' '
+}
+
+if [ -z "$cliproxy_detail" ]; then
+  printf '%s\n' "$_base_line"
+else
+  _line="$_base_line"
+  while IFS= read -r _account_seg; do
+    [ -z "$_account_seg" ] && continue
+    _candidate="${_line}  ${_account_seg}"
+    _candidate_len=$(visible_length "$_candidate")
+    if [ "$_candidate_len" -gt "$terminal_cols" ]; then
+      printf '%s\n' "$_line"
+      _line="  ${_account_seg}"
+    else
+      _line="$_candidate"
+    fi
+  done <<EOF
+$cliproxy_detail
+EOF
+  printf '%s\n' "$_line"
+fi
