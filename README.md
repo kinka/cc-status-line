@@ -170,6 +170,10 @@ bun --no-env-file --use-system-ca ~/.claude/cliproxy-quota.ts --print
 ~/.claude/cliproxy-quota.json
 ```
 
+后台刷新的节流时间戳写入 `~/.claude/cliproxy-quota.refresh`：即使缓存仍是旧 schema 或采集失败，也保证每个 TTL 周期最多拉起一次采集器。
+
+状态栏、采集器和安装脚本都优先使用 `CLAUDE_CONFIG_DIR`，未设置时回退到 `~/.claude`。
+
 配置和缓存均包含敏感或隐私信息，采集器会将它们限制为 `0600`。不要将 management key、OAuth token、真实配置或额度缓存提交到 Git。连续使用错误 management key 请求 CPA 可能触发临时 IP 封禁。
 
 ## 开发与测试

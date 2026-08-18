@@ -26,6 +26,7 @@ async function render(
   modelId: string,
   displayName: string,
   columns = 500,
+  env: Record<string, string> = {},
 ): Promise<string> {
   const input = JSON.stringify({
     cwd: home,
@@ -40,6 +41,7 @@ async function render(
       HOME: home,
       ANTHROPIC_BASE_URL: baseUrl,
       COLUMNS: String(columns),
+      ...env,
     },
   });
   expect(result.exitCode).toBe(0);
@@ -207,5 +209,79 @@ describe("rendering", () => {
     expect(grok).toContain("grok wk:75%");
     expect(gpt).toContain("gpt 7d:65%");
     expect(gpt).not.toContain("5h:");
+  });
+});
+
+describe("config dir and refresh throttle", () => {
+  test("reads cache from CLAUDE_CONFIG_DIR when set", async () => {
+    const altDir = await mkdtemp(join(tmpdir(), "cc-statusline-alt-"));
+    try {
+      await writeFile(
+        join(altDir, "cliproxy-quota.json"),
+        JSON.stringify({
+          schema_version: 2,
+          updated_at: Math.floor(Date.now() / 1000),
+          instances: {
+            "https://cpa.example": {
+              antigravity: {
+                accounts: [gemQuota("alt-dir@example.com", 10, 20)],
+              },
+            },
+          },
+        }),
+      );
+      await writeCache({
+        schema_version: 2,
+        updated_at: Math.floor(Date.now() / 1000),
+        instances: {
+          "https://cpa.example": {
+            antigravity: {
+              accounts: [gemQuota("home-dir@example.com", 10, 20)],
+            },
+          },
+        },
+      });
+
+      const out = stripAnsi(
+        await render("https://cpa.example", "gemini-flash", "Gemini", 500, {
+          CLAUDE_CONFIG_DIR: altDir,
+        }),
+      );
+      expect(out).toContain("alt-dir");
+      expect(out).not.toContain("home-dir");
+    } finally {
+      await rm(altDir, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy schema only spawns collector once per TTL", async () => {
+    const collector = join(claudeDir, "cliproxy-quota.ts");
+    const counter = join(claudeDir, "collector-runs.txt");
+    await writeFile(
+      collector,
+      [
+        "import { appendFileSync } from 'node:fs';",
+        `appendFileSync(${JSON.stringify(counter)}, "1\\n");`,
+        "await Bun.sleep(50);",
+      ].join("\n"),
+    );
+    await writeCache({
+      updated_at: Math.floor(Date.now() / 1000),
+      pad: {
+        antigravity: {
+          accounts: [gemQuota("legacy@example.com", 10, 20)],
+        },
+      },
+    });
+
+    await render("http://pad.gf.com.cn:8317", "gemini-flash", "Gemini");
+    await render("http://pad.gf.com.cn:8317", "gemini-flash", "Gemini");
+    await Bun.sleep(120);
+
+    const runs = await Bun.file(counter)
+      .text()
+      .then((text) => text.trim().split("\n").filter(Boolean).length)
+      .catch(() => 0);
+    expect(runs).toBe(1);
   });
 });

@@ -169,9 +169,12 @@ fi
 # --- CLIProxyAPI 额度 (cx/cxx/cj 走自建 CPA 代理时) ---
 # 实例(哪套 CPA)由会话的 ANTHROPIC_BASE_URL 决定,provider 由 model 决定。
 # v2 缓存按规范化 base_url 分实例: {instances:{<base_url>:{provider:...}}}。
-CPQ_CACHE="$HOME/.claude/cliproxy-quota.json"
-CPQ_COLLECT="$HOME/.claude/cliproxy-quota.ts"
-CPQ_TTL=300          # 缓存超过 5 分钟即后台刷新
+# 与 cliproxy-quota.ts 一致: 优先 CLAUDE_CONFIG_DIR,否则 ~/.claude。
+CPQ_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CPQ_CACHE="$CPQ_DIR/cliproxy-quota.json"
+CPQ_COLLECT="$CPQ_DIR/cliproxy-quota.ts"
+CPQ_REFRESH_STAMP="$CPQ_DIR/cliproxy-quota.refresh"
+CPQ_TTL=300          # 缓存超过 5 分钟即后台刷新; stamp 同样按 TTL 节流,避免旧 schema 每次渲染都 spawn
 cliproxy_str=""
 _m=$(printf '%s%s' "$model_id" "$model" | tr 'A-Z' 'a-z')
 # provider: gpt/codex -> codex; grok/xai -> xai; gemini/antigravity -> antigravity(windows结构与codex同构)
@@ -191,6 +194,7 @@ if [ -n "$_PROV" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
     *)                            _LEGACY_INST="" ;;
   esac
   # 缓存过期或仍是旧 schema 时后台异步刷新,本次继续显示可用旧值。
+  # 用 refresh stamp 节流: 即使 schema 仍非 v2 / 采集失败,也不会每次渲染都 spawn。
   if [ -f "$CPQ_COLLECT" ] && command -v bun >/dev/null 2>&1; then
     _age=999999
     if [ -f "$CPQ_CACHE" ]; then
@@ -199,7 +203,16 @@ if [ -n "$_PROV" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
       [ -n "$_upd" ] && _age=$(( now - _upd ))
       [ "$_schema" != "2" ] && _age=999999
     fi
-    if [ "$_age" -ge "$CPQ_TTL" ]; then
+    _stamp_age=999999
+    if [ -f "$CPQ_REFRESH_STAMP" ]; then
+      _stamp_upd=$(cat "$CPQ_REFRESH_STAMP" 2>/dev/null)
+      case "$_stamp_upd" in
+        ''|*[!0-9]*) ;;
+        *) _stamp_age=$(( now - _stamp_upd )) ;;
+      esac
+    fi
+    if [ "$_age" -ge "$CPQ_TTL" ] && [ "$_stamp_age" -ge "$CPQ_TTL" ]; then
+      printf '%s\n' "$now" > "$CPQ_REFRESH_STAMP" 2>/dev/null || true
       (
         unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
         bun --no-env-file --use-system-ca "$CPQ_COLLECT" >/dev/null 2>&1 &

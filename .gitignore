@@ -1,11 +1,13 @@
 .DS_Store
 .claude/
+.cursor/
 node_modules/
 coverage/
 
 # 运行时额度缓存
 cliproxy-quota.json
 cliproxy-quota.json.tmp*
+cliproxy-quota.refresh
 
 # 单文件 CPA 配置、旧管理密钥和本地配置
 cliproxy-config.json
