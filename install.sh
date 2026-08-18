@@ -6,6 +6,11 @@ CLAUDE_DIR="$HOME/.claude"
 
 mkdir -p "$CLAUDE_DIR"
 
+if ! command -v bun >/dev/null 2>&1; then
+  printf '错误:未找到 Bun,请先安装 https://bun.sh\n' >&2
+  exit 1
+fi
+
 install_link() {
   _name=$1
   _source="$REPO_DIR/$_name"
@@ -30,9 +35,20 @@ install_link() {
   printf '已安装: %s -> %s\n' "$_target" "$_source"
 }
 
-chmod 755 "$REPO_DIR/statusline-command.sh" "$REPO_DIR/cliproxy-quota.py"
+chmod 755 "$REPO_DIR/statusline-command.sh" "$REPO_DIR/cliproxy-quota.ts"
 install_link statusline-command.sh
-install_link cliproxy-quota.py
+install_link cliproxy-quota.ts
+
+# 仅清理本仓库旧版本创建的 Python 符号链接,不触碰用户自己的文件。
+_legacy_link="$CLAUDE_DIR/cliproxy-quota.py"
+if [ -L "$_legacy_link" ] && [ "$(readlink "$_legacy_link")" = "$REPO_DIR/cliproxy-quota.py" ]; then
+  rm "$_legacy_link"
+  printf '已移除旧链接: %s\n' "$_legacy_link"
+fi
+
+printf '\nCPA 配置检查/迁移:\n'
+printf '  bun --no-env-file --use-system-ca %s --check-config\n' "$CLAUDE_DIR/cliproxy-quota.ts"
+printf '  bun --no-env-file --use-system-ca %s --migrate-config\n' "$CLAUDE_DIR/cliproxy-quota.ts"
 
 printf '\nClaude Code settings.json 应包含:\n'
 printf '%s\n' '  "statusLine": {'

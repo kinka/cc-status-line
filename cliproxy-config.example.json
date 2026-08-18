@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "instances": {
+    "http://cpa-a.example:8317": {
+      "management_key": "replace-with-management-key",
+      "providers": ["codex", "xai", "antigravity"]
+    },
+    "https://cpa-b.example": {
+      "management_key": "replace-with-management-key",
+      "providers": ["xai", "antigravity"],
+      "management_url": "https://cpa-b.example/v0/management"
+    }
+  }
+}

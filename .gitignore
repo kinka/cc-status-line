@@ -1,12 +1,15 @@
 .DS_Store
-__pycache__/
-*.py[cod]
+.claude/
+node_modules/
+coverage/
 
 # 运行时额度缓存
 cliproxy-quota.json
-cliproxy-quota.json.tmp
+cliproxy-quota.json.tmp*
 
-# 管理密钥和本地配置
+# 单文件 CPA 配置、旧管理密钥和本地配置
+cliproxy-config.json
+cliproxy-config.json.tmp*
 .cliproxy-mgmt-key
 .earnrmb-mgmt-key
 *.key

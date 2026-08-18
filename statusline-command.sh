@@ -168,9 +168,9 @@ fi
 
 # --- CLIProxyAPI 额度 (cx/cxx/cj 走自建 CPA 代理时) ---
 # 实例(哪套 CPA)由会话的 ANTHROPIC_BASE_URL 决定,provider 由 model 决定。
-# 缓存两级: {<实例>:{codex,xai,antigravity}}。同是 grok,pad 与 earnrmb 各读各的池。
+# v2 缓存按规范化 base_url 分实例: {instances:{<base_url>:{provider:...}}}。
 CPQ_CACHE="$HOME/.claude/cliproxy-quota.json"
-CPQ_COLLECT="$HOME/.claude/cliproxy-quota.py"
+CPQ_COLLECT="$HOME/.claude/cliproxy-quota.ts"
 CPQ_TTL=300          # 缓存超过 5 分钟即后台刷新
 cliproxy_str=""
 _m=$(printf '%s%s' "$model_id" "$model" | tr 'A-Z' 'a-z')
@@ -181,22 +181,29 @@ case "$_m" in
   *gemini*|*antigravity*) _PROV="antigravity"; _PLABEL="gem" ;;
   *)                      _PROV="" ;;
 esac
-if [ -n "$_PROV" ]; then
-  # 实例: 优先 ANTHROPIC_BASE_URL(cx/cxx/cj 会话会带),回退到 model 启发式
-  case "${ANTHROPIC_BASE_URL:-}" in
-    *earnrmb*)       _INST="earnrmb" ;;
-    *pad.gf.com.cn*) _INST="pad" ;;
-    *) case "$_m" in *grok-4.5*) _INST="earnrmb" ;; *) _INST="pad" ;; esac ;;
+if [ -n "$_PROV" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  # 实例严格按当前会话 base URL 选择。仅去掉末尾斜杠,未知 URL 不回退到其他 CPA。
+  _INST=$(printf '%s' "$ANTHROPIC_BASE_URL" | sed 's:/*$::')
+  # 一个兼容版本内允许两条历史 URL 读取旧 pad/earnrmb 顶层缓存键。
+  case "$_INST" in
+    http://pad.gf.com.cn:8317)    _LEGACY_INST="pad" ;;
+    https://api.earnrmb.online)  _LEGACY_INST="earnrmb" ;;
+    *)                            _LEGACY_INST="" ;;
   esac
-  # 缓存过期则后台异步刷新(不阻塞状态栏),本次仍显示旧值
-  if [ -f "$CPQ_COLLECT" ]; then
+  # 缓存过期或仍是旧 schema 时后台异步刷新,本次继续显示可用旧值。
+  if [ -f "$CPQ_COLLECT" ] && command -v bun >/dev/null 2>&1; then
     _age=999999
     if [ -f "$CPQ_CACHE" ]; then
       _upd=$(jq -r '.updated_at // 0' "$CPQ_CACHE" 2>/dev/null)
+      _schema=$(jq -r '.schema_version // 1' "$CPQ_CACHE" 2>/dev/null)
       [ -n "$_upd" ] && _age=$(( now - _upd ))
+      [ "$_schema" != "2" ] && _age=999999
     fi
     if [ "$_age" -ge "$CPQ_TTL" ]; then
-      ( python3 "$CPQ_COLLECT" >/dev/null 2>&1 & ) 2>/dev/null
+      (
+        unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+        bun --no-env-file --use-system-ca "$CPQ_COLLECT" >/dev/null 2>&1 &
+      ) 2>/dev/null
     fi
   fi
   cliproxy_detail=""
@@ -206,8 +213,10 @@ if [ -n "$_PROV" ]; then
       # 逐账户明细: 追加在同一行末尾,账户用邮箱前缀(@ 前最多 8 字符)+ 周剩余% + 重置倒计时
       # 字段分隔符用 \x1f(非空白)而不是 \t: read 在 IFS 为空白字符(含 tab)时会
       # 把连续分隔符合并,导致中间的空字段被吃掉、后续字段全部错位。
-      _acc_tsv=$(jq -r --arg i "$_INST" '
-        (.[$i].xai.accounts // [])
+      _acc_tsv=$(jq -r --arg i "$_INST" --arg legacy "$_LEGACY_INST" '
+        (if .schema_version == 2 then .instances[$i].xai
+         elif $legacy != "" then .[$legacy].xai else null end) as $quota
+        | ($quota.accounts // [])
         | if length==0 then empty else
             .[] | "\(.email // "?")\(.used)\(.reset_at // "")"
           end' "$CPQ_CACHE" 2>/dev/null)
@@ -227,15 +236,20 @@ $_acc_tsv
 EOF
       fi
       if [ -n "$cliproxy_detail" ]; then
-        _stale=$(jq -r --arg i "$_INST" '.[$i].xai.stale // false' "$CPQ_CACHE" 2>/dev/null)
+        _stale=$(jq -r --arg i "$_INST" --arg legacy "$_LEGACY_INST" '
+          (if .schema_version == 2 then .instances[$i].xai
+           elif $legacy != "" then .[$legacy].xai else null end).stale // false
+        ' "$CPQ_CACHE" 2>/dev/null)
         _st=""; [ "$_stale" = "true" ] && _st="~"
         cliproxy_str=" ${MUTED}| grok${_st}${RESET}"
       fi
     else
       # codex/antigravity: 去掉池总览,只平铺每个账户自己的 5h + 7d。
       # 逐账户明细: 追加在同一行末尾,账户用邮箱前缀(@ 前最多 8 字符)+ 自己的 5h + 7d
-      _acc_tsv=$(jq -r --arg i "$_INST" --arg p "$_PROV" '
-        (.[$i][$p].accounts // [])
+      _acc_tsv=$(jq -r --arg i "$_INST" --arg legacy "$_LEGACY_INST" --arg p "$_PROV" '
+        (if .schema_version == 2 then .instances[$i][$p]
+         elif $legacy != "" then .[$legacy][$p] else null end) as $quota
+        | ($quota.accounts // [])
         | if length==0 then empty else
             .[] | . as $a
             | ($a.windows // []) as $ws
@@ -259,7 +273,10 @@ $_acc_tsv
 EOF
       fi
       if [ -n "$cliproxy_detail" ]; then
-        _stale=$(jq -r --arg i "$_INST" --arg p "$_PROV" '.[$i][$p].stale // false' "$CPQ_CACHE" 2>/dev/null)
+        _stale=$(jq -r --arg i "$_INST" --arg legacy "$_LEGACY_INST" --arg p "$_PROV" '
+          (if .schema_version == 2 then .instances[$i][$p]
+           elif $legacy != "" then .[$legacy][$p] else null end).stale // false
+        ' "$CPQ_CACHE" 2>/dev/null)
         _st=""; [ "$_stale" = "true" ] && _st="~"
         cliproxy_str=" ${MUTED}| ${_PLABEL}${_st}${RESET}"
       fi
