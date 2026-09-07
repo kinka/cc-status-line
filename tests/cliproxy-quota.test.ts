@@ -8,6 +8,7 @@ import {
   atomicWriteJson0600,
   cacheInstancesView,
   checkConfig,
+  claudeQuota,
   codexQuota,
   isoEpoch,
   loadConfig,
@@ -84,6 +85,7 @@ describe("config", () => {
       "codex",
       "xai",
       "antigravity",
+      "claude",
     ]);
   });
 
@@ -239,6 +241,42 @@ describe("provider parsing", () => {
       { seconds: 604800, used: 25 },
       { seconds: 18000, used: 75 },
     ]);
+  });
+
+  test("parses Claude unified rate-limit signals from auth-files", () => {
+    const quota = claudeQuota({
+      provider: "claude",
+      auth_index: "auth-1",
+      account_type: "oauth",
+      quota: {
+        signals: {
+          "Anthropic-Ratelimit-Unified-5h-Utilization": "0.45",
+          "Anthropic-Ratelimit-Unified-5h-Reset": "1788762000",
+          "Anthropic-Ratelimit-Unified-7d-Utilization": "0.15",
+          "Anthropic-Ratelimit-Unified-7d-Reset": "1788998400",
+        },
+      },
+    });
+    expect(quota).toEqual({
+      plan: "oauth",
+      windows: [
+        { seconds: 18000, used: 45, reset_at: 1788762000 },
+        { seconds: 604800, used: 15, reset_at: 1788998400 },
+      ],
+    });
+  });
+
+  test("ignores Claude accounts without usable signals", () => {
+    expect(
+      claudeQuota({ provider: "claude", auth_index: "auth-1" }),
+    ).toBeNull();
+    expect(
+      claudeQuota({
+        provider: "claude",
+        auth_index: "auth-1",
+        quota: { signals: { "Anthropic-Ratelimit-Unified-Status": "allowed" } },
+      }),
+    ).toBeNull();
   });
 
   test("converts ISO timestamps to epoch seconds", () => {

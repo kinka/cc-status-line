@@ -3,7 +3,7 @@
   "instances": {
     "http://cpa-a.example:8317": {
       "management_key": "replace-with-management-key",
-      "providers": ["codex", "xai", "antigravity"]
+      "providers": ["codex", "xai", "antigravity", "claude"]
     },
     "https://cpa-b.example": {
       "management_key": "replace-with-management-key",

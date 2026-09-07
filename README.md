@@ -10,6 +10,7 @@ Claude Code 状态栏与 CLIProxyAPI（CPA）多实例、多账户额度展示�
 - Codex / GPT：读取上游真实额度窗口；上游缺少 `5h` 时只显示 `7d`。
 - XAI / Grok：显示真实 weekly 额度（`wk`）。
 - Antigravity / Gemini：同时显示 `5h` 与 `7d`。
+- Claude / CPA 池（`cc`）：同时显示 `5h` 与 `7d`；走 CPA 代理时 Claude Code 自身不返回 `rate_limits`，官方额度段为空，改由这里展示池内账户额度。
 - 多 CPA 实例：以当前会话的 `ANTHROPIC_BASE_URL` 精确选择实例。
 - 单一配置文件：在一个 JSON 中维护所有 CPA base URL、management key 和 provider allowlist。
 - 多账户：按邮箱 `@` 前缀平铺有效账户；超宽时以账户为单位换行，不拆散同一账户的额度窗口。
@@ -94,7 +95,7 @@ chmod 600 ~/.claude/cliproxy-config.json
 - statusline 去掉 URL 末尾 `/` 后精确匹配；未知 URL 不会回退到其他 CPA。
 - `management_key` 是 CPA management API 的 bearer key，不是模型推理 API key。
 - `management_url` 可选，默认是 `<base_url>/v0/management`。
-- `providers` 可选，默认采集 `codex`、`xai`、`antigravity`；显式配置时只采集列出的 provider。
+- `providers` 可选，默认采集 `codex`、`xai`、`antigravity`、`claude`；显式配置时只采集列出的 provider。
 - 同一个 provider 可以存在于多个 base URL 中，每个实例使用自己的 management key 和账户池。
 
 如果 management API 使用 HTTP，bearer key 会以明文在网络中传输；仅应在可信内网中使用。
@@ -133,6 +134,7 @@ bun --no-env-file --use-system-ca \
 - `gpt` / `codex` → `codex`
 - `grok` / `xai` → `xai`
 - `gemini` / `antigravity` → `antigravity`
+- `claude` / `opus` / `sonnet` / `haiku` → `claude`
 
 无法识别实例或 provider 时只隐藏 CPA 额度，不影响官方额度、Git、上下文等状态栏内容。
 
@@ -143,6 +145,8 @@ bun --no-env-file --use-system-ca \
 - Codex：`https://chatgpt.com/backend-api/wham/usage`
 - XAI：`https://cli-chat-proxy.grok.com/v1/billing?format=credits`
 - Antigravity：`https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
+
+Claude 是唯一不需要回源的 provider：CPA 已把上游的 `Anthropic-Ratelimit-Unified-*` 响应头缓存在 `/auth-files` 的 `quota.signals` 里，采集器直接读取 `5h`/`7d` 的 `Utilization`（0~1 比例）与 `Reset`（epoch 秒）。
 
 XAI 响应中没有 `creditUsagePercent` 的账户不会计入额度池。Grok 当前上游只提供 weekly 订阅额度，因此状态栏不会推算或伪造 `5h`。
 

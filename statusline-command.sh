@@ -177,11 +177,13 @@ CPQ_REFRESH_STAMP="$CPQ_DIR/cliproxy-quota.refresh"
 CPQ_TTL=300          # 缓存超过 5 分钟即后台刷新; stamp 同样按 TTL 节流,避免旧 schema 每次渲染都 spawn
 cliproxy_str=""
 _m=$(printf '%s%s' "$model_id" "$model" | tr 'A-Z' 'a-z')
-# provider: gpt/codex -> codex; grok/xai -> xai; gemini/antigravity -> antigravity(windows结构与codex同构)
+# provider: gpt/codex -> codex; grok/xai -> xai; gemini/antigravity -> antigravity; claude -> claude
+# (antigravity/claude 的 windows 结构与 codex 同构,共用同一段渲染)
 case "$_m" in
   *gpt*|*codex*)          _PROV="codex"; _PLABEL="gpt" ;;
   *grok*|*xai*)           _PROV="xai" ;;
   *gemini*|*antigravity*) _PROV="antigravity"; _PLABEL="gem" ;;
+  *claude*|*opus*|*sonnet*|*haiku*) _PROV="claude"; _PLABEL="cc" ;;
   *)                      _PROV="" ;;
 esac
 if [ -n "$_PROV" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then

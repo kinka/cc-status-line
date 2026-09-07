@@ -24,6 +24,7 @@ export const SUPPORTED_PROVIDERS = [
   "codex",
   "xai",
   "antigravity",
+  "claude",
 ] as const;
 export type Provider = (typeof SUPPORTED_PROVIDERS)[number];
 
@@ -389,6 +390,14 @@ function nullableNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+// 限流响应头的值是字符串形式的数字("0.45"/"1788762000")。
+function numericString(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export async function codexQuota(
   instance: InstanceConfig,
   index: string | number,
@@ -506,6 +515,40 @@ export async function xaiQuota(
     products,
     period_end: nullableString(config.billingPeriodEnd),
   };
+}
+
+const CLAUDE_WINDOWS = [
+  ["5h", 18000],
+  ["7d", 604800],
+] as const;
+
+/**
+ * claude 账户不需要回源:CPA 已把上游 Anthropic 的 unified 限流响应头
+ * 缓存在 /auth-files 的 quota.signals 里(utilization 是 0~1 的比例)。
+ */
+export function claudeQuota(account: AccountRecord): CodexQuota | null {
+  const quota = isRecord(account.quota) ? account.quota : null;
+  if (!quota || !isRecord(quota.signals)) return null;
+  const signals = new Map<string, unknown>();
+  for (const [key, value] of Object.entries(quota.signals)) {
+    signals.set(key.toLowerCase(), value);
+  }
+  const windows: QuotaWindow[] = [];
+  for (const [label, seconds] of CLAUDE_WINDOWS) {
+    const utilization = numericString(
+      signals.get(`anthropic-ratelimit-unified-${label}-utilization`),
+    );
+    if (utilization === null) continue;
+    windows.push({
+      seconds,
+      used: round2(utilization * 100),
+      reset_at: numericString(
+        signals.get(`anthropic-ratelimit-unified-${label}-reset`),
+      ),
+    });
+  }
+  if (windows.length === 0) return null;
+  return { plan: nullableString(account.account_type), windows };
 }
 
 function accountEmail(account: AccountRecord): string | null {
@@ -665,6 +708,46 @@ export async function collectAntigravity(
   };
 }
 
+export async function collectClaude(
+  _instance: InstanceConfig,
+  accounts: AccountRecord[],
+): Promise<ProviderQuota> {
+  const candidates = enabledAccounts(accounts, "claude");
+  const rows: Array<{
+    email: string | null;
+    plan: string | null;
+    windows: QuotaWindow[];
+    used: number;
+  }> = [];
+  for (const account of candidates) {
+    const quota = claudeQuota(account);
+    if (!quota || quota.windows.length === 0) continue;
+    const weekly = quota.windows.reduce((best, window) =>
+      (window.seconds ?? 0) > (best.seconds ?? 0) ? window : best,
+    );
+    rows.push({
+      email: accountEmail(account),
+      plan: quota.plan,
+      windows: quota.windows,
+      used: weekly.used,
+    });
+  }
+  if (rows.length === 0) return null;
+  rows.sort((a, b) => b.used - a.used);
+  const best = rows[0];
+  return {
+    email: best.email,
+    plan: best.plan,
+    windows: best.windows,
+    accounts_total: candidates.length,
+    accounts_usable: rows.length,
+    accounts: rows.map((row) => ({
+      email: row.email,
+      windows: row.windows,
+    })),
+  };
+}
+
 const COLLECTORS: Record<
   Provider,
   (instance: InstanceConfig, accounts: AccountRecord[]) => Promise<ProviderQuota>
@@ -672,6 +755,7 @@ const COLLECTORS: Record<
   codex: collectCodex,
   xai: collectXai,
   antigravity: collectAntigravity,
+  claude: collectClaude,
 };
 
 export async function collect(config: EffectiveConfig): Promise<CacheV2> {
