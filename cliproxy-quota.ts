@@ -29,7 +29,7 @@ export const SUPPORTED_PROVIDERS = [
 export type Provider = (typeof SUPPORTED_PROVIDERS)[number];
 
 const SUPPORTED_PROVIDER_SET = new Set<string>(SUPPORTED_PROVIDERS);
-const TIMEOUT_MS = 25_000;
+const TIMEOUT_MS = 10_000;
 const CODEX_UA =
   "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal";
 const ANTIGRAVITY_UA =
@@ -569,32 +569,30 @@ export async function collectCodex(
   accounts: AccountRecord[],
 ): Promise<ProviderQuota> {
   const candidates = enabledAccounts(accounts, "codex");
-  const rows: Array<{
-    email: string | null;
-    plan: string | null;
-    windows: QuotaWindow[];
-    used: number;
-  }> = [];
-  for (const account of candidates) {
-    const index = authIndex(account);
-    if (index === null) continue;
-    let quota: CodexQuota | null = null;
-    try {
-      quota = await codexQuota(instance, index);
-    } catch {
-      // 单账户失败不影响同池其他账户。
-    }
-    if (!quota || quota.windows.length === 0) continue;
-    const weekly = quota.windows.reduce((best, window) =>
-      (window.seconds ?? 0) > (best.seconds ?? 0) ? window : best,
-    );
-    rows.push({
-      email: accountEmail(account),
-      plan: quota.plan,
-      windows: quota.windows,
-      used: weekly.used,
-    });
-  }
+  const settled = await Promise.all(
+    candidates.map(async (account) => {
+      const index = authIndex(account);
+      if (index === null) return null;
+      try {
+        const quota = await codexQuota(instance, index);
+        if (!quota || quota.windows.length === 0) return null;
+        const weekly = quota.windows.reduce((best, window) =>
+          (window.seconds ?? 0) > (best.seconds ?? 0) ? window : best,
+        );
+        return {
+          email: accountEmail(account),
+          plan: quota.plan,
+          windows: quota.windows,
+          used: weekly.used,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const rows = settled.filter(
+    (row): row is NonNullable<typeof row> => row !== null,
+  );
   if (rows.length === 0) return null;
   rows.sort((a, b) => b.used - a.used);
   const best = rows[0];
@@ -616,31 +614,28 @@ export async function collectXai(
   accounts: AccountRecord[],
 ): Promise<ProviderQuota> {
   const candidates = enabledAccounts(accounts, "xai");
-  const rows: Array<{
-    email: string | null;
-    used_pct: number;
-    reset_at: number | null;
-    products: Array<{ name: string | null; used: number }>;
-    period_end: string | null;
-  }> = [];
-  for (const account of candidates) {
-    const index = authIndex(account);
-    if (index === null) continue;
-    let quota: XaiQuota | null = null;
-    try {
-      quota = await xaiQuota(instance, index);
-    } catch {
-      // 单账户失败不影响同池其他账户。
-    }
-    if (!quota || quota.used_pct === null) continue;
-    rows.push({
-      email: accountEmail(account),
-      used_pct: quota.used_pct,
-      reset_at: quota.reset_at,
-      products: quota.products,
-      period_end: quota.period_end,
-    });
-  }
+  const settled = await Promise.all(
+    candidates.map(async (account) => {
+      const index = authIndex(account);
+      if (index === null) return null;
+      try {
+        const quota = await xaiQuota(instance, index);
+        if (!quota || quota.used_pct === null) return null;
+        return {
+          email: accountEmail(account),
+          used_pct: quota.used_pct,
+          reset_at: quota.reset_at,
+          products: quota.products,
+          period_end: quota.period_end,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const rows = settled.filter(
+    (row): row is NonNullable<typeof row> => row !== null,
+  );
   const result: Record<string, unknown> = {
     accounts_total: rows.length,
     accounts_usable: rows.length,
@@ -662,36 +657,34 @@ export async function collectAntigravity(
   accounts: AccountRecord[],
 ): Promise<ProviderQuota> {
   const candidates = enabledAccounts(accounts, "antigravity");
-  const rows: Array<{
-    email: string | null;
-    plan: null;
-    windows: QuotaWindow[];
-    used: number;
-  }> = [];
-  for (const account of candidates) {
-    const index = authIndex(account);
-    if (index === null) continue;
-    let quota: CodexQuota | null = null;
-    try {
-      quota = await antigravityQuota(
-        instance,
-        index,
-        nullableString(account.project_id),
-      );
-    } catch {
-      // 单账户失败不影响同池其他账户。
-    }
-    if (!quota || quota.windows.length === 0) continue;
-    const weekly = quota.windows.reduce((best, window) =>
-      (window.seconds ?? 0) > (best.seconds ?? 0) ? window : best,
-    );
-    rows.push({
-      email: accountEmail(account),
-      plan: null,
-      windows: quota.windows,
-      used: weekly.used,
-    });
-  }
+  const settled = await Promise.all(
+    candidates.map(async (account) => {
+      const index = authIndex(account);
+      if (index === null) return null;
+      try {
+        const quota = await antigravityQuota(
+          instance,
+          index,
+          nullableString(account.project_id),
+        );
+        if (!quota || quota.windows.length === 0) return null;
+        const weekly = quota.windows.reduce((best, window) =>
+          (window.seconds ?? 0) > (best.seconds ?? 0) ? window : best,
+        );
+        return {
+          email: accountEmail(account),
+          plan: null,
+          windows: quota.windows,
+          used: weekly.used,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const rows = settled.filter(
+    (row): row is NonNullable<typeof row> => row !== null,
+  );
   if (rows.length === 0) return null;
   rows.sort((a, b) => b.used - a.used);
   const best = rows[0];
@@ -764,21 +757,25 @@ export async function collect(config: EffectiveConfig): Promise<CacheV2> {
     updated_at: Math.floor(Date.now() / 1000),
     instances: {},
   };
-  for (const [baseUrl, instance] of config.instances) {
-    const node: InstanceQuota = {};
-    for (const provider of instance.providers) node[provider] = null;
-    try {
-      const accounts = await listAccounts(instance);
-      for (const provider of instance.providers) {
-        node[provider] = await COLLECTORS[provider](instance, accounts);
+  await Promise.all(
+    Array.from(config.instances.entries()).map(async ([baseUrl, instance]) => {
+      const node: InstanceQuota = {};
+      for (const provider of instance.providers) node[provider] = null;
+      try {
+        const accounts = await listAccounts(instance);
+        await Promise.all(
+          instance.providers.map(async (provider) => {
+            node[provider] = await COLLECTORS[provider](instance, accounts);
+          }),
+        );
+      } catch (error) {
+        console.error(
+          `${baseUrl} collect failed: ${error instanceof Error ? error.name : "Error"}: ${errorMessage(error)}`,
+        );
       }
-    } catch (error) {
-      console.error(
-        `${baseUrl} collect failed: ${error instanceof Error ? error.name : "Error"}: ${errorMessage(error)}`,
-      );
-    }
-    result.instances[baseUrl] = node;
-  }
+      result.instances[baseUrl] = node;
+    }),
+  );
   return result;
 }
 
