@@ -35,6 +35,15 @@ const CODEX_UA =
 const ANTIGRAVITY_UA =
   "antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)";
 
+// antigravity 配额端点按官方客户端的候选顺序排列：
+// cloudcode-pa 主端点对部分账号返回“满额占位”响应（remaining=1 且
+// resetTime 随请求时间漂移），daily- 前缀端点才返回真实配额。
+const ANTIGRAVITY_QUOTA_ENDPOINTS = [
+  "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+  "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
+  "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+] as const;
+
 const LEGACY_SPECS = [
   {
     baseUrl: "http://pad.gf.com.cn:8317",
@@ -445,18 +454,37 @@ export async function antigravityQuota(
   projectId: string | null,
 ): Promise<CodexQuota | null> {
   if (!projectId) return null;
-  const { status, body } = await apiCall(
-    instance,
-    index,
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-    {
-      Authorization: "Bearer $TOKEN$",
-      "Content-Type": "application/json",
-      "User-Agent": ANTIGRAVITY_UA,
-    },
-    "POST",
-    JSON.stringify({ project: projectId }),
-  );
+  const request = async (
+    url: string,
+  ): Promise<{ status: number | null; body: unknown }> =>
+    apiCall(
+      instance,
+      index,
+      url,
+      {
+        Authorization: "Bearer $TOKEN$",
+        "Content-Type": "application/json",
+        "User-Agent": ANTIGRAVITY_UA,
+      },
+      "POST",
+      JSON.stringify({ project: projectId }),
+    );
+  // 依官方客户端候选顺序逐个尝试，首个 200 且含 groups 的响应生效。
+  let last: { status: number | null; body: unknown } | null = null;
+  for (const url of ANTIGRAVITY_QUOTA_ENDPOINTS) {
+    const result = await request(url);
+    if (
+      result.status === 200 &&
+      isRecord(result.body) &&
+      Array.isArray(result.body.groups)
+    ) {
+      last = result;
+      break;
+    }
+    last = result;
+  }
+  if (!last) return null;
+  const { status, body } = last;
   if (status !== 200 || !isRecord(body) || !Array.isArray(body.groups)) {
     return null;
   }
