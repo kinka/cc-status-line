@@ -181,8 +181,9 @@ _m=$(printf '%s%s' "$model_id" "$model" | tr 'A-Z' 'a-z')
 # (antigravity/claude 的 windows 结构与 codex 同构,共用同一段渲染)
 case "$_m" in
   *gpt*|*codex*)          _PROV="codex"; _PLABEL="gpt" ;;
-  *grok*|*xai*)           _PROV="xai" ;;
+  *grok*|*xai*)           _PROV="xai"; _PLABEL="grok" ;;
   *gemini*|*antigravity*) _PROV="antigravity"; _PLABEL="gem" ;;
+  *kimi*|*moonshot*)      _PROV="kimi"; _PLABEL="kimi" ;;
   *claude*|*opus*|*sonnet*|*haiku*) _PROV="claude"; _PLABEL="cc" ;;
   *)                      _PROV="" ;;
 esac
@@ -256,7 +257,7 @@ EOF
            elif $legacy != "" then .[$legacy].xai else null end).stale // false
         ' "$CPQ_CACHE" 2>/dev/null)
         _st=""; [ "$_stale" = "true" ] && _st="~"
-        cliproxy_str=" ${MUTED}| grok${_st}${RESET}"
+        cliproxy_str=" ${MUTED}| ${_PLABEL}${_st}${RESET}"
       fi
     else
       # codex/antigravity: 去掉池总览,只平铺每个账户自己的 5h + 7d。

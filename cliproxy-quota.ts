@@ -25,6 +25,7 @@ export const SUPPORTED_PROVIDERS = [
   "xai",
   "antigravity",
   "claude",
+  "kimi",
 ] as const;
 export type Provider = (typeof SUPPORTED_PROVIDERS)[number];
 
@@ -43,6 +44,23 @@ const ANTIGRAVITY_QUOTA_ENDPOINTS = [
   "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
   "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
 ] as const;
+
+// Kimi Code 订阅用量。CPA 按区域写入 provider:国内区 "kimi"，国际区 "kimi-ai"/"kimi.ai"。
+const KIMI_QUOTA_ENDPOINTS: Record<string, string> = {
+  kimi: "https://api.kimi.com/coding/v1/usages",
+  "kimi-ai": "https://api.kimi.ai/coding/v1/usages",
+  "kimi.ai": "https://api.kimi.ai/coding/v1/usages",
+};
+const KIMI_DEFAULT_ENDPOINT = KIMI_QUOTA_ENDPOINTS.kimi;
+
+// Kimi 计数窗口的 timeUnit 前缀(官方返回 "TIME_UNIT_MINUTE" 等)。
+const KIMI_TIME_UNITS: Record<string, number> = {
+  "TIME_UNIT_SECOND": 1,
+  "TIME_UNIT_MINUTE": 60,
+  "TIME_UNIT_HOUR": 3600,
+  "TIME_UNIT_DAY": 86400,
+  "TIME_UNIT_WEEK": 604800,
+};
 
 const LEGACY_SPECS = [
   {
@@ -179,8 +197,15 @@ function parseProviders(value: unknown, path: string): Provider[] {
   }
   const providers: Provider[] = [];
   const seen = new Set<string>();
-  for (const provider of value) {
-    if (typeof provider !== "string" || !SUPPORTED_PROVIDER_SET.has(provider)) {
+  for (const raw of value) {
+    if (typeof raw !== "string") {
+      throw new Error(
+        `${path}: supported values are ${SUPPORTED_PROVIDERS.join(", ")}`,
+      );
+    }
+    // Kimi 国际区的 auth-file provider 是 "kimi-ai"/"kimi.ai",归一到同一个采集器。
+    const provider = raw === "kimi-ai" || raw === "kimi.ai" ? "kimi" : raw;
+    if (!SUPPORTED_PROVIDER_SET.has(provider)) {
       throw new Error(
         `${path}: supported values are ${SUPPORTED_PROVIDERS.join(", ")}`,
       );
@@ -550,6 +575,128 @@ const CLAUDE_WINDOWS = [
   ["7d", 604800],
 ] as const;
 
+// 上游比例池的窗口 key -> 秒数。
+const KIMI_RATIO_WINDOWS: Record<string, number> = {
+  limit_5h: 18000,
+  limit_7d: 604800,
+};
+
+/** 计数窗口里的 limit/used/remaining 常以字符串返回,时间在 resetTime 或 reset_at。 */
+function kimiCountDetail(
+  value: unknown,
+): { used: number; reset_at: number | null } | null {
+  if (!isRecord(value)) return null;
+  const limit = numericString(value.limit) ?? numericString(value.total);
+  const used = numericString(value.used) ?? numericString(value.consumed);
+  const remaining = numericString(value.remaining) ?? numericString(value.left);
+  let resolved = used;
+  if (resolved === null && limit !== null && remaining !== null) {
+    resolved = Math.max(0, limit - remaining);
+  }
+  if (resolved === null) return null;
+  return {
+    used: resolved,
+    reset_at: isoEpoch(value.resetTime) ?? isoEpoch(value.reset_at),
+  };
+}
+
+/** 计数窗口时长:window.duration 乘 timeUnit 前缀对应的秒数。 */
+function kimiWindowSeconds(windowMeta: unknown): number | null {
+  if (!isRecord(windowMeta)) return null;
+  const duration = numericString(windowMeta.duration);
+  const unitSeconds =
+    typeof windowMeta.timeUnit === "string"
+      ? KIMI_TIME_UNITS[windowMeta.timeUnit]
+      : undefined;
+  if (duration === null || duration <= 0 || !unitSeconds) return null;
+  return duration * unitSeconds;
+}
+
+/** limits[] 的一项:detail 可能嵌套,时长在 window 里,缺失时长时按官方 5h 频控窗口计。 */
+function kimiLimitWindow(entry: unknown): QuotaWindow | null {
+  if (!isRecord(entry)) return null;
+  const detailRecord = isRecord(entry.detail) ? entry.detail : entry;
+  const detail = kimiCountDetail(detailRecord);
+  if (!detail) return null;
+  const limit =
+    numericString(detailRecord.limit) ?? numericString(detailRecord.total);
+  if (limit === null || limit <= 0) return null;
+  return {
+    seconds: kimiWindowSeconds(entry.window) ?? 18000,
+    used: round2((detail.used / limit) * 100),
+    reset_at: detail.reset_at,
+  };
+}
+
+/** 新版 usages 比例池:used_ratio 为 0~1,reset_time 是 ISO 时间。 */
+function kimiRatioWindows(
+  root: Record<string, unknown>,
+): Map<number, QuotaWindow> {
+  const pools = new Map<number, QuotaWindow>();
+  if (!isRecord(root.usages)) return pools;
+  for (const [key, seconds] of Object.entries(KIMI_RATIO_WINDOWS)) {
+    const pool = root.usages[key];
+    if (!isRecord(pool)) continue;
+    const ratio = numericString(pool.used_ratio);
+    if (ratio === null || ratio < 0) continue;
+    pools.set(seconds, {
+      seconds,
+      used: round2(Math.min(1, ratio) * 100),
+      reset_at: isoEpoch(pool.reset_time),
+    });
+  }
+  return pools;
+}
+
+/**
+ * kimi 订阅额度解析。上游同时存在计数格式(usage + limits)和新比例池(usages),
+ * 比例池给出的窗口优先,其余用计数窗口补齐;同一窗口只保留一条。
+ */
+export function kimiQuotaFromBody(body: unknown): CodexQuota | null {
+  const root = isRecord(body) && isRecord(body.data) ? body.data : body;
+  if (!isRecord(root)) return null;
+  const windows = new Map<number, QuotaWindow>();
+  const usage = isRecord(root.usage) ? root.usage : null;
+  const usageDetail = usage ? kimiCountDetail(usage) : null;
+  const usageLimit = usage ? (numericString(usage.limit) ?? 0) : 0;
+  if (usageDetail && usageLimit > 0) {
+    windows.set(604800, {
+      seconds: 604800,
+      used: round2((usageDetail.used / usageLimit) * 100),
+      reset_at: usageDetail.reset_at,
+    });
+  }
+  if (Array.isArray(root.limits)) {
+    for (const entry of root.limits) {
+      const window = kimiLimitWindow(entry);
+      if (window?.seconds) windows.set(window.seconds, window);
+    }
+  }
+  // 比例池最后写入:同一窗口新版字段优先于计数格式。
+  for (const [seconds, window] of kimiRatioWindows(root)) {
+    windows.set(seconds, window);
+  }
+  if (windows.size === 0) return null;
+  const ordered = [...windows.values()].sort(
+    (a, b) => (b.seconds ?? 0) - (a.seconds ?? 0),
+  );
+  return { plan: null, windows: ordered };
+}
+
+/** CPA 按区域写入 provider:国内区 kimi,国际区 kimi-ai / kimi.ai。 */
+export async function kimiQuota(
+  instance: InstanceConfig,
+  index: string | number,
+  endpoint: string,
+): Promise<CodexQuota | null> {
+  const { status, body } = await apiCall(instance, index, endpoint, {
+    Authorization: "Bearer $TOKEN$",
+    Accept: "application/json",
+  });
+  if (status !== 200) return null;
+  return kimiQuotaFromBody(body);
+}
+
 /**
  * claude 账户不需要回源:CPA 已把上游 Anthropic 的 unified 限流响应头
  * 缓存在 /auth-files 的 quota.signals 里(utilization 是 0~1 的比例)。
@@ -583,12 +730,20 @@ function accountEmail(account: AccountRecord): string | null {
   return nullableString(account.email);
 }
 
+/** CPA 国际区把 kimi 记为 "kimi-ai"/"kimi.ai",归一到同一个 provider。 */
+function accountProvider(account: AccountRecord): string | null {
+  const raw = nullableString(account.provider);
+  if (raw === null) return null;
+  return raw === "kimi-ai" || raw === "kimi.ai" ? "kimi" : raw;
+}
+
 function enabledAccounts(
   accounts: AccountRecord[],
   provider: Provider,
 ): AccountRecord[] {
   return accounts.filter(
-    (account) => account.provider === provider && account.disabled !== true,
+    (account) =>
+      accountProvider(account) === provider && account.disabled !== true,
   );
 }
 
@@ -769,6 +924,57 @@ export async function collectClaude(
   };
 }
 
+export async function collectKimi(
+  instance: InstanceConfig,
+  accounts: AccountRecord[],
+): Promise<ProviderQuota> {
+  const candidates = enabledAccounts(accounts, "kimi");
+  const settled = await Promise.all(
+    candidates.map(async (account) => {
+      const index = authIndex(account);
+      if (index === null) return null;
+      try {
+        const quota = await kimiQuota(
+          instance,
+          index,
+          (typeof account.provider === "string"
+            ? KIMI_QUOTA_ENDPOINTS[account.provider]
+            : undefined) ?? KIMI_DEFAULT_ENDPOINT,
+        );
+        if (!quota || quota.windows.length === 0) return null;
+        const weekly =
+          quota.windows.find((window) => window.seconds === 604800) ??
+          quota.windows[0];
+        return {
+          email: accountEmail(account),
+          plan: quota.plan,
+          windows: quota.windows,
+          used: weekly.used,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const rows = settled.filter(
+    (row): row is NonNullable<typeof row> => row !== null,
+  );
+  if (rows.length === 0) return null;
+  rows.sort((a, b) => b.used - a.used);
+  const best = rows[0];
+  return {
+    email: best.email,
+    plan: best.plan,
+    windows: best.windows,
+    accounts_total: candidates.length,
+    accounts_usable: rows.length,
+    accounts: rows.map((row) => ({
+      email: row.email,
+      windows: row.windows,
+    })),
+  };
+}
+
 const COLLECTORS: Record<
   Provider,
   (instance: InstanceConfig, accounts: AccountRecord[]) => Promise<ProviderQuota>
@@ -777,6 +983,7 @@ const COLLECTORS: Record<
   xai: collectXai,
   antigravity: collectAntigravity,
   claude: collectClaude,
+  kimi: collectKimi,
 };
 
 export async function collect(config: EffectiveConfig): Promise<CacheV2> {

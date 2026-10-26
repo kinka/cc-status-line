@@ -10,6 +10,7 @@ Claude Code 状态栏与 CLIProxyAPI（CPA）多实例、多账户额度展示�
 - Codex / GPT：读取上游真实额度窗口；上游缺少 `5h` 时只显示 `7d`。
 - XAI / Grok：显示真实 weekly 额度（`wk`）。
 - Antigravity / Gemini：同时显示 `5h` 与 `7d`。
+- Kimi / Moonshot：同时显示 `5h` 频控与 `7d` 订阅额度（新版比例池优先，旧版计数窗口回退）。
 - Claude / CPA 池（`cc`）：同时显示 `5h` 与 `7d`；走 CPA 代理时 Claude Code 自身不返回 `rate_limits`，官方额度段为空，改由这里展示池内账户额度。
 - 多 CPA 实例：以当前会话的 `ANTHROPIC_BASE_URL` 精确选择实例。
 - 单一配置文件：在一个 JSON 中维护所有 CPA base URL、management key 和 provider allowlist。
@@ -95,7 +96,7 @@ chmod 600 ~/.claude/cliproxy-config.json
 - statusline 去掉 URL 末尾 `/` 后精确匹配；未知 URL 不会回退到其他 CPA。
 - `management_key` 是 CPA management API 的 bearer key，不是模型推理 API key。
 - `management_url` 可选，默认是 `<base_url>/v0/management`。
-- `providers` 可选，默认采集 `codex`、`xai`、`antigravity`、`claude`；显式配置时只采集列出的 provider。
+- `providers` 可选，默认采集 `codex`、`xai`、`antigravity`、`claude`、`kimi`；显式配置时只采集列出的 provider。Kimi 国际区可写 `kimi-ai` 或 `kimi.ai`，与 `kimi` 等价。
 - 同一个 provider 可以存在于多个 base URL 中，每个实例使用自己的 management key 和账户池。
 
 如果 management API 使用 HTTP，bearer key 会以明文在网络中传输；仅应在可信内网中使用。
@@ -134,6 +135,7 @@ bun --no-env-file --use-system-ca \
 - `gpt` / `codex` → `codex`
 - `grok` / `xai` → `xai`
 - `gemini` / `antigravity` → `antigravity`
+- `kimi` / `moonshot` → `kimi`
 - `claude` / `opus` / `sonnet` / `haiku` → `claude`
 
 无法识别实例或 provider 时只隐藏 CPA 额度，不影响官方额度、Git、上下文等状态栏内容。
@@ -145,10 +147,13 @@ bun --no-env-file --use-system-ca \
 - Codex：`https://chatgpt.com/backend-api/wham/usage`
 - XAI：`https://cli-chat-proxy.grok.com/v1/billing?format=credits`
 - Antigravity：`https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
+- Kimi：`https://api.kimi.com/coding/v1/usages`（国内区 `kimi`）/ `https://api.kimi.ai/coding/v1/usages`（国际区 `kimi-ai`、`kimi.ai`）
 
 Claude 是唯一不需要回源的 provider：CPA 已把上游的 `Anthropic-Ratelimit-Unified-*` 响应头缓存在 `/auth-files` 的 `quota.signals` 里，采集器直接读取 `5h`/`7d` 的 `Utilization`（0~1 比例）与 `Reset`（epoch 秒）。
 
 XAI 响应中没有 `creditUsagePercent` 的账户不会计入额度池。Grok 当前上游只提供 weekly 订阅额度，因此状态栏不会推算或伪造 `5h`。
+
+Kimi 上游的 `usage` + `limits[]` 是请求计数，状态栏只按 `used/limit` 换算百分比；新版 `usages.limit_5h`/`limit_7d` 比例池（`used_ratio` 为 0~1）存在时优先于计数窗口。底层月度共享额度只在部分套餐暴露、且官方 `totalQuota` 语义不可靠，因此不采集、不展示。
 
 采集器会清除 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`，保持 CPA 直连；生产调用使用 Bun 的 `--no-env-file` 与 `--use-system-ca`。
 

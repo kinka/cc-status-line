@@ -210,6 +210,26 @@ describe("rendering", () => {
     expect(gpt).toContain("gpt 7d:65%");
     expect(gpt).not.toContain("5h:");
   });
+
+  test("routes Moonshot models to Kimi quota windows", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeCache({
+      schema_version: 2,
+      updated_at: now,
+      instances: {
+        "https://cpa.example": {
+          kimi: {
+            accounts: [gemQuota("moonshot@example.com", 40, 60)],
+          },
+        },
+      },
+    });
+
+    const out = stripAnsi(
+      await render("https://cpa.example", "kimi-k2-turbo", "Kimi K2"),
+    );
+    expect(out).toMatch(/kimi\b.*moonshot 5h:60%.* 7d:40%/);
+  });
 });
 
 describe("config dir and refresh throttle", () => {

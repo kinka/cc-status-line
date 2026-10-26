@@ -11,6 +11,7 @@ import {
   claudeQuota,
   codexQuota,
   isoEpoch,
+  kimiQuotaFromBody,
   loadConfig,
   migrateConfig,
   normalizeBaseUrl,
@@ -86,6 +87,7 @@ describe("config", () => {
       "xai",
       "antigravity",
       "claude",
+      "kimi",
     ]);
   });
 
@@ -115,6 +117,39 @@ describe("config", () => {
     );
     await chmod(paths.config, 0o644);
     await expect(loadConfig(paths, false)).rejects.toThrow("permissions");
+  });
+
+  test("normalizes Kimi regional provider aliases", async () => {
+    await writeSecure(
+      paths.config,
+      JSON.stringify({
+        version: 1,
+        instances: {
+          "https://cpa.example": {
+            management_key: "secret",
+            providers: ["kimi", "kimi-ai"],
+          },
+        },
+      }),
+    );
+    await expect(loadConfig(paths, false)).rejects.toThrow("duplicate provider");
+
+    await writeSecure(
+      paths.config,
+      JSON.stringify({
+        version: 1,
+        instances: {
+          "https://cpa.example": {
+            management_key: "secret",
+            providers: ["kimi.ai"],
+          },
+        },
+      }),
+    );
+    const config = await loadConfig(paths, false);
+    expect(config.instances.get("https://cpa.example")?.providers).toEqual([
+      "kimi",
+    ]);
   });
 
   test("normalizes only trailing slashes and rejects unsafe URLs", () => {
@@ -241,6 +276,64 @@ describe("provider parsing", () => {
       { seconds: 604800, used: 25 },
       { seconds: 18000, used: 75 },
     ]);
+  });
+
+  test("parses Kimi count windows and prefers the ratio pools", () => {
+    const counted = kimiQuotaFromBody({
+      usage: {
+        limit: "2048",
+        used: "1024",
+        resetTime: "2026-01-09T15:23:13.716839300Z",
+      },
+      limits: [
+        {
+          window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" },
+          detail: {
+            limit: "200",
+            used: "50",
+            resetTime: "2026-01-06T13:33:02.717479433Z",
+          },
+        },
+      ],
+    });
+    expect(counted?.windows).toEqual([
+      { seconds: 604800, used: 50, reset_at: 1767972193 },
+      { seconds: 18000, used: 25, reset_at: 1767706382 },
+    ]);
+
+    const pooled = kimiQuotaFromBody({
+      data: {
+        usages: {
+          limit_5h: { used_ratio: 0.25, reset_time: "2026-01-06T13:33:02Z" },
+          limit_7d: { used_ratio: 0.5, reset_time: "2026-01-09T15:23:13Z" },
+        },
+        usage: { limit: "2048", used: "2048" },
+        limits: [
+          {
+            window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" },
+            detail: { limit: "200", used: "199" },
+          },
+        ],
+      },
+    });
+    expect(pooled?.windows).toEqual([
+      { seconds: 604800, used: 50, reset_at: 1767972193 },
+      { seconds: 18000, used: 25, reset_at: 1767706382 },
+    ]);
+  });
+
+  test("derives Kimi usage from remaining and ignores empty payloads", () => {
+    const quota = kimiQuotaFromBody({
+      limits: [
+        {
+          window: { duration: 5, timeUnit: "TIME_UNIT_HOUR" },
+          detail: { limit: 200, remaining: 50 },
+        },
+      ],
+    });
+    expect(quota?.windows).toEqual([{ seconds: 18000, used: 75, reset_at: null }]);
+    expect(kimiQuotaFromBody({ usage: { limit: "0", used: "0" } })).toBeNull();
+    expect(kimiQuotaFromBody("nope")).toBeNull();
   });
 
   test("parses Claude unified rate-limit signals from auth-files", () => {
