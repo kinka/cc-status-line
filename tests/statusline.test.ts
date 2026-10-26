@@ -18,7 +18,20 @@ afterEach(async () => {
 });
 
 function stripAnsi(value: string): string {
-  return value.replace(/\[[0-9;]*m/g, "");
+  return value.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+// 后台 collector 是 fire-and-forget;等它写出信号文件,而不是猜一个固定时长。
+async function waitForText(path: string, timeoutMs = 5000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const text = await Bun.file(path)
+      .text()
+      .catch(() => null);
+    if (text !== null) return text;
+    if (Date.now() >= deadline) throw new Error(`timeout waiting for ${path}`);
+    await Bun.sleep(20);
+  }
 }
 
 async function render(
@@ -274,6 +287,27 @@ describe("config dir and refresh throttle", () => {
     }
   });
 
+  test("refresh only targets the active provider", async () => {
+    const collector = join(claudeDir, "cliproxy-quota.ts");
+    const seen = join(claudeDir, "collector-argv.txt");
+    await writeFile(
+      collector,
+      [
+        "import { appendFileSync } from 'node:fs';",
+        `appendFileSync(${JSON.stringify(seen)}, Bun.argv.slice(2).join(" ") + "\\n");`,
+      ].join("\n"),
+    );
+    await writeCache({
+      schema_version: 2,
+      updated_at: 0,
+      instances: { "https://cpa.example": { xai: { accounts: [] } } },
+    });
+
+    await render("https://cpa.example", "grok-4", "Grok");
+
+    expect((await waitForText(seen)).trim()).toBe("--provider xai");
+  });
+
   test("legacy schema only spawns collector once per TTL", async () => {
     const collector = join(claudeDir, "cliproxy-quota.ts");
     const counter = join(claudeDir, "collector-runs.txt");
@@ -296,12 +330,11 @@ describe("config dir and refresh throttle", () => {
 
     await render("http://pad.gf.com.cn:8317", "gemini-flash", "Gemini");
     await render("http://pad.gf.com.cn:8317", "gemini-flash", "Gemini");
-    await Bun.sleep(120);
 
-    const runs = await Bun.file(counter)
-      .text()
-      .then((text) => text.trim().split("\n").filter(Boolean).length)
-      .catch(() => 0);
+    const runs = (await waitForText(counter))
+      .trim()
+      .split("\n")
+      .filter(Boolean).length;
     expect(runs).toBe(1);
   });
 });

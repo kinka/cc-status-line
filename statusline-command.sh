@@ -218,7 +218,9 @@ if [ -n "$_PROV" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
       printf '%s\n' "$now" > "$CPQ_REFRESH_STAMP" 2>/dev/null || true
       (
         unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
-        bun --no-env-file --use-system-ca "$CPQ_COLLECT" >/dev/null 2>&1 &
+        # 只刷新当前会话正在用的 provider:其余 provider 的旧值由采集器原样保留,
+        # 避免为状态栏用不到的池反复打上游。
+        bun --no-env-file --use-system-ca "$CPQ_COLLECT" --provider "$_PROV" >/dev/null 2>&1 &
       ) 2>/dev/null
     fi
   fi
