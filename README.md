@@ -171,6 +171,14 @@ bun --no-env-file --use-system-ca ~/.claude/cliproxy-quota.ts
 bun --no-env-file --use-system-ca ~/.claude/cliproxy-quota.ts --print
 ```
 
+只刷新一个 provider（可选 `codex`、`xai`、`antigravity`、`claude`、`kimi`），保留其他 provider 的缓存：
+
+```sh
+bun --no-env-file --use-system-ca ~/.claude/cliproxy-quota.ts --provider codex
+```
+
+单 provider 刷新时间写入缓存的 `provider_updated_at`；`updated_at` 仍表示最近一次全量采集时间。
+
 `--print` 输出包含账户邮箱和额度信息，仅应在可信的本地终端中使用。
 
 缓存写入：

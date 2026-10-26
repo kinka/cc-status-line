@@ -127,6 +127,7 @@ export type InstanceQuota = Partial<Record<Provider, ProviderQuota>>;
 export interface CacheV2 {
   schema_version: 2;
   updated_at: number;
+  provider_updated_at?: Partial<Record<Provider, number>>;
   instances: Record<string, InstanceQuota>;
 }
 
@@ -1057,6 +1058,53 @@ export function applyStaleFallback(
   return result;
 }
 
+/** 单 provider 采集只替换对应节点, 保留其他 provider 和全量采集的时间戳。 */
+export function mergeProviderResult(
+  result: CacheV2,
+  oldValue: unknown,
+  config: EffectiveConfig,
+  provider: Provider,
+): CacheV2 {
+  const instances: Record<string, InstanceQuota> = {};
+  for (const [baseUrl, node] of Object.entries(cacheInstancesView(oldValue))) {
+    instances[baseUrl] = { ...node };
+  }
+  for (const [baseUrl, instance] of config.instances) {
+    if (!instance.providers.includes(provider)) continue;
+    instances[baseUrl] ??= {};
+    instances[baseUrl][provider] = result.instances[baseUrl]?.[provider] ?? null;
+  }
+
+  const oldRecord = isRecord(oldValue) ? oldValue : {};
+  const oldTimes = isRecord(oldRecord.provider_updated_at)
+    ? oldRecord.provider_updated_at
+    : {};
+  const providerUpdatedAt: Partial<Record<Provider, number>> = {};
+  for (const name of SUPPORTED_PROVIDERS) {
+    const value = oldTimes[name];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      providerUpdatedAt[name] = value;
+    }
+  }
+  providerUpdatedAt[provider] = result.updated_at;
+  return {
+    schema_version: 2,
+    updated_at: nullableNumber(oldRecord.updated_at) ?? result.updated_at,
+    provider_updated_at: providerUpdatedAt,
+    instances,
+  };
+}
+
+function configForProvider(config: EffectiveConfig, provider: Provider): EffectiveConfig {
+  const instances = new Map<string, InstanceConfig>();
+  for (const [baseUrl, instance] of config.instances) {
+    if (instance.providers.includes(provider)) {
+      instances.set(baseUrl, { ...instance, providers: [provider] });
+    }
+  }
+  return { ...config, instances };
+}
+
 async function readCache(paths: RuntimePaths): Promise<unknown> {
   if (!(await pathExists(paths.cache))) return null;
   await assertSecureRegularFile(paths.cache, paths.cache, true);
@@ -1132,17 +1180,22 @@ export async function checkConfig(paths = runtimePaths()): Promise<void> {
 export async function runCollection(
   paths = runtimePaths(),
   print = false,
+  provider?: Provider,
 ): Promise<number> {
   try {
     const config = await loadConfig(paths, true);
     if (config.source === "legacy") {
       console.error("legacy key files are deprecated; run --migrate-config");
     }
-    const result = await collect(config);
+    const collectionConfig = provider ? configForProvider(config, provider) : config;
+    const result = await collect(collectionConfig);
     const oldValue = await readCache(paths);
-    applyStaleFallback(result, oldValue, config);
-    await atomicWriteJson0600(paths.cache, result);
-    if (print) console.log(JSON.stringify(result, null, 2));
+    applyStaleFallback(result, oldValue, collectionConfig);
+    const output = provider
+      ? mergeProviderResult(result, oldValue, collectionConfig, provider)
+      : result;
+    await atomicWriteJson0600(paths.cache, output);
+    if (print) console.log(JSON.stringify(output, null, 2));
     return 0;
   } catch (error) {
     console.error(`cliproxy-quota failed: ${errorMessage(error)}`);
@@ -1160,7 +1213,16 @@ export async function main(args = Bun.argv.slice(2)): Promise<number> {
       await checkConfig();
       return 0;
     }
-    return runCollection(runtimePaths(), args.includes("--print"));
+    let provider: Provider | undefined;
+    const providerIndex = args.indexOf("--provider");
+    if (providerIndex >= 0) {
+      const value = args[providerIndex + 1];
+      if (!value || !SUPPORTED_PROVIDER_SET.has(value)) {
+        throw new Error(`--provider: supported values are ${SUPPORTED_PROVIDERS.join(", ")}`);
+      }
+      provider = value as Provider;
+    }
+    return runCollection(runtimePaths(), args.includes("--print"), provider);
   } catch (error) {
     console.error(`cliproxy-quota failed: ${errorMessage(error)}`);
     return 1;

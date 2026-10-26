@@ -13,6 +13,7 @@ import {
   isoEpoch,
   kimiQuotaFromBody,
   loadConfig,
+  mergeProviderResult,
   migrateConfig,
   normalizeBaseUrl,
   type CacheV2,
@@ -428,6 +429,43 @@ describe("cache", () => {
     );
     expect(result.instances["https://cpa.example"].xai?.stale).toBe(true);
     expect(result.instances["https://cpa.example"].codex).toBeUndefined();
+  });
+
+  test("single-provider merge preserves other providers and their timestamps", () => {
+    const config: EffectiveConfig = {
+      version: 1,
+      source: "config",
+      instances: new Map([
+        ["https://cpa.example", { ...instance(), providers: ["xai"] }],
+      ]),
+    };
+    const result: CacheV2 = {
+      schema_version: 2,
+      updated_at: 100,
+      instances: { "https://cpa.example": { xai: { reset_at: 200 } } },
+    };
+    const merged = mergeProviderResult(
+      result,
+      {
+        schema_version: 2,
+        updated_at: 50,
+        provider_updated_at: { codex: 25 },
+        instances: {
+          "https://cpa.example": {
+            codex: { windows: [{ used: 10 }] },
+            xai: { reset_at: 100 },
+          },
+        },
+      },
+      config,
+      "xai",
+    );
+    expect(merged.updated_at).toBe(50);
+    expect(merged.provider_updated_at).toEqual({ codex: 25, xai: 100 });
+    expect(merged.instances["https://cpa.example"].codex).toEqual({
+      windows: [{ used: 10 }],
+    });
+    expect(merged.instances["https://cpa.example"].xai).toEqual({ reset_at: 200 });
   });
 
   test("writes JSON atomically with mode 0600", async () => {
