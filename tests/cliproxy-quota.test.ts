@@ -9,9 +9,12 @@ import {
   cacheInstancesView,
   checkConfig,
   claudeQuota,
+  collectClaude,
   codexQuota,
   isoEpoch,
   kimiQuotaFromBody,
+  opusapiQuotaFromBody,
+  opusapiTargets,
   loadConfig,
   mergeProviderResult,
   migrateConfig,
@@ -371,6 +374,173 @@ describe("provider parsing", () => {
         quota: { signals: { "Anthropic-Ratelimit-Unified-Status": "allowed" } },
       }),
     ).toBeNull();
+  });
+
+  test("parses OpusAPI weekly percentage without dollar fields", () => {
+    const expiresAt = "2026-11-04T11:15:53.348447+08:00";
+    expect(
+      opusapiQuotaFromBody({
+        ok: true,
+        plan_name: "GO · 7 天",
+        weekly_pct: 17,
+        weekly_unlimited: false,
+        expires_at: expiresAt,
+      }),
+    ).toEqual({
+      plan: "GO · 7 天",
+      windows: [
+        {
+          seconds: 604800,
+          used: 17,
+          reset_at: Math.trunc(Date.parse(expiresAt) / 1000),
+        },
+      ],
+    });
+    expect(opusapiQuotaFromBody({ ok: false, weekly_pct: 17 })).toBeNull();
+    expect(opusapiQuotaFromBody({ ok: true, weekly_unlimited: true })).toBeNull();
+    expect(opusapiQuotaFromBody({ weekly_pct: 17 })).toBeNull();
+  });
+
+  test("selects only OpusAPI Claude keys and drops the key material", () => {
+    expect(
+      opusapiTargets([
+        {
+          name: "opusapi",
+          "base-url": "https://api.opusapi.xyz",
+          keys: [
+            { "api-key": "sk-secret", auth_index: "idx-opus" },
+            { "api-key": "sk-secret-2", auth_index: "idx-opus-2" },
+            { "api-key": "sk-off", auth_index: "idx-off", disabled: true },
+          ],
+        },
+        {
+          name: "claude-1",
+          "base-url": "https://api.b.ai",
+          keys: [{ "api-key": "sk-other", auth_index: "idx-bai" }],
+        },
+        {
+          name: "sk-not-a-label",
+          "base-url": "https://claude.opusapi.xyz/v1",
+          keys: [{ auth_index: "" }, { auth_index: "idx-named" }],
+        },
+      ]),
+    ).toEqual([
+      { authIndex: "idx-opus", label: "opusapi" },
+      { authIndex: "idx-opus-2", label: "opusapi2" },
+      { authIndex: "idx-named", label: "opusapi3" },
+    ]);
+    expect(JSON.stringify(opusapiTargets("nope"))).not.toContain("sk-");
+  });
+
+  test("adds the OpusAPI weekly window beside Claude OAuth accounts", async () => {
+    const requests: Array<{ url: string; body: string }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      requests.push({ url, body });
+      if (url.endsWith("/v8/management/config/api-keys/claude")) {
+        return new Response(
+          JSON.stringify([
+            {
+              name: "opusapi",
+              "base-url": "https://api.opusapi.xyz/",
+              keys: [{ "api-key": "sk-should-not-leak", auth_index: "idx-opus" }],
+            },
+            {
+              name: "claude-1",
+              "base-url": "https://api.b.ai",
+              keys: [{ "api-key": "sk-other", auth_index: "idx-bai" }],
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          status_code: 200,
+          body: JSON.stringify({
+            ok: true,
+            plan_name: "GO · 7 天",
+            weekly_pct: 17,
+            expires_at: "2026-11-04T03:15:53Z",
+          }),
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    const quota = await collectClaude(instance(), [
+      {
+        provider: "claude",
+        auth_index: "oauth-1",
+        email: "kinka@example.com",
+        account_type: "oauth",
+        quota: {
+          signals: {
+            "Anthropic-Ratelimit-Unified-5h-Utilization": "0.45",
+            "Anthropic-Ratelimit-Unified-5h-Reset": "1788762000",
+            "Anthropic-Ratelimit-Unified-7d-Utilization": "0.80",
+            "Anthropic-Ratelimit-Unified-7d-Reset": "1788998400",
+          },
+        },
+      },
+    ]);
+
+    expect(requests.map((request) => request.url)).toEqual([
+      "https://cpa.example/v8/management/config/api-keys/claude",
+      "https://cpa.example/v0/management/api-call",
+    ]);
+    expect(requests[1]?.body).toContain('"auth_index":"idx-opus"');
+    expect(requests[1]?.body).toContain(
+      "https://claude.opusapi.xyz/cli/auth/account-status",
+    );
+    expect(requests[1]?.body).toContain("$TOKEN$");
+    expect(JSON.stringify(requests)).not.toContain("sk-should-not-leak");
+    expect(JSON.stringify(quota)).not.toContain("sk-should-not-leak");
+    expect(quota?.accounts).toEqual([
+      {
+        email: "kinka@example.com",
+        windows: [
+          { seconds: 18000, used: 45, reset_at: 1788762000 },
+          { seconds: 604800, used: 80, reset_at: 1788998400 },
+        ],
+      },
+      {
+        email: "opusapi",
+        windows: [
+          {
+            seconds: 604800,
+            used: 17,
+            reset_at: Math.trunc(Date.parse("2026-11-04T03:15:53Z") / 1000),
+          },
+        ],
+      },
+    ]);
+    expect(quota?.accounts_total).toBe(2);
+    expect(quota?.accounts_usable).toBe(2);
+  });
+
+  test("keeps Claude OAuth windows when the OpusAPI config lookup fails", async () => {
+    globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
+    const quota = await collectClaude(instance(), [
+      {
+        provider: "claude",
+        auth_index: "oauth-1",
+        email: "kinka@example.com",
+        quota: {
+          signals: {
+            "Anthropic-Ratelimit-Unified-7d-Utilization": "0.15",
+            "Anthropic-Ratelimit-Unified-7d-Reset": "1788998400",
+          },
+        },
+      },
+    ]);
+    expect(quota?.accounts).toEqual([
+      {
+        email: "kinka@example.com",
+        windows: [{ seconds: 604800, used: 15, reset_at: 1788998400 }],
+      },
+    ]);
   });
 
   test("converts ISO timestamps to epoch seconds", () => {

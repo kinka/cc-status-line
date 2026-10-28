@@ -360,6 +360,28 @@ async function managementRequest(
   return parsed;
 }
 
+/** v8 配置树和 v0 运维接口在同一端口，只是前缀不同。 */
+function v8ManagementRoot(instance: InstanceConfig): string | null {
+  const suffix = "/v0/management";
+  if (!instance.managementUrl.endsWith(suffix)) return null;
+  return `${instance.managementUrl.slice(0, -suffix.length)}/v8/management`;
+}
+
+async function managementGet(
+  instance: InstanceConfig,
+  url: string,
+): Promise<unknown> {
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${instance.managementKey}` },
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+    redirect: "follow",
+    tls: { rejectUnauthorized: true },
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`management HTTP ${response.status}`);
+  return JSON.parse(await response.text()) as unknown;
+}
+
 async function apiCall(
   instance: InstanceConfig,
   authIndex: string | number,
@@ -727,6 +749,133 @@ export function claudeQuota(account: AccountRecord): CodexQuota | null {
   return { plan: nullableString(account.account_type), windows };
 }
 
+// OpusAPI 周额度。推理在 api.opusapi.xyz，百分比在 claude.opusapi.xyz，
+// 且只认 API key，不认控制台 JWT。CPA 用 auth_index 代持 key，采集器不读 key 原文。
+const OPUSAPI_HOSTS = new Set(["api.opusapi.xyz", "claude.opusapi.xyz"]);
+const OPUSAPI_STATUS_URL =
+  "https://claude.opusapi.xyz/cli/auth/account-status";
+
+export function isOpusapiBaseUrl(value: unknown): boolean {
+  if (typeof value !== "string" || value.trim() === "") return false;
+  try {
+    return OPUSAPI_HOSTS.has(new URL(value).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function opusapiLabel(name: unknown): string {
+  if (typeof name !== "string") return "opusapi";
+  const trimmed = name.trim();
+  if (!/^[A-Za-z0-9._-]{1,32}$/.test(trimmed)) return "opusapi";
+  if (/^(sk-|sk_)/i.test(trimmed)) return "opusapi";
+  return trimmed;
+}
+
+export interface OpusapiTarget {
+  authIndex: string | number;
+  label: string;
+}
+
+/** 从 v8 `api-keys.claude` 分组里挑出 OpusAPI key 的 auth_index。不返回 key 原文。 */
+export function opusapiTargets(groups: unknown): OpusapiTarget[] {
+  if (!Array.isArray(groups)) return [];
+  const targets: OpusapiTarget[] = [];
+  const used = new Set<string>();
+  for (const group of groups) {
+    if (!isRecord(group)) continue;
+    if (!isOpusapiBaseUrl(group["base-url"] ?? group.base_url)) continue;
+    if (!Array.isArray(group.keys)) continue;
+    const base = opusapiLabel(group.name);
+    let ordinal = 0;
+    for (const key of group.keys) {
+      if (!isRecord(key) || key.disabled === true) continue;
+      const authIndex = key.auth_index;
+      if (typeof authIndex === "string") {
+        if (authIndex.trim() === "") continue;
+      } else if (typeof authIndex !== "number") {
+        continue;
+      }
+      let label = ordinal === 0 ? base : `${base}${ordinal + 1}`;
+      while (used.has(label)) {
+        ordinal += 1;
+        label = `${base}${ordinal + 1}`;
+      }
+      used.add(label);
+      targets.push({ authIndex, label });
+      ordinal += 1;
+    }
+  }
+  return targets;
+}
+
+/** account-status 的 weekly_pct 是已用百分比，不是 0~1 比例。 */
+export function opusapiQuotaFromBody(body: unknown): CodexQuota | null {
+  if (!isRecord(body) || body.ok !== true) return null;
+  const pct = numericString(body.weekly_pct);
+  if (pct === null || pct < 0) return null;
+  return {
+    plan: nullableString(body.plan_name),
+    windows: [
+      {
+        seconds: 604800,
+        used: round2(Math.min(100, pct)),
+        reset_at: isoEpoch(body.expires_at),
+      },
+    ],
+  };
+}
+
+async function opusapiAccountRows(instance: InstanceConfig): Promise<{
+  attempted: number;
+  rows: Array<{
+    email: string;
+    plan: string | null;
+    windows: QuotaWindow[];
+    used: number;
+  }>;
+}> {
+  const root = v8ManagementRoot(instance);
+  if (!root) return { attempted: 0, rows: [] };
+  const groups = await managementGet(
+    instance,
+    `${root}/config/api-keys/claude`,
+  );
+  const targets = opusapiTargets(groups);
+  if (targets.length === 0) return { attempted: 0, rows: [] };
+  const settled = await Promise.all(
+    targets.map(async (target) => {
+      try {
+        const { status, body } = await apiCall(
+          instance,
+          target.authIndex,
+          OPUSAPI_STATUS_URL,
+          {
+            Authorization: "Bearer $TOKEN$",
+            Accept: "application/json",
+          },
+        );
+        if (status !== 200) return null;
+        const quota = opusapiQuotaFromBody(body);
+        const weekly = quota?.windows[0];
+        if (!quota || !weekly) return null;
+        return {
+          email: target.label,
+          plan: quota.plan,
+          windows: quota.windows,
+          used: weekly.used,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return {
+    attempted: targets.length,
+    rows: settled.filter((row): row is NonNullable<typeof row> => row !== null),
+  };
+}
+
 function accountEmail(account: AccountRecord): string | null {
   return nullableString(account.email);
 }
@@ -886,7 +1035,7 @@ export async function collectAntigravity(
 }
 
 export async function collectClaude(
-  _instance: InstanceConfig,
+  instance: InstanceConfig,
   accounts: AccountRecord[],
 ): Promise<ProviderQuota> {
   const candidates = enabledAccounts(accounts, "claude");
@@ -909,6 +1058,16 @@ export async function collectClaude(
       used: weekly.used,
     });
   }
+  // OAuth 窗口来自 auth-files；OpusAPI 的周百分比要另问 account-status。
+  // 后者失败时仍返回已有 OAuth 行。
+  let opusapiAttempted = 0;
+  try {
+    const extra = await opusapiAccountRows(instance);
+    opusapiAttempted = extra.attempted;
+    rows.push(...extra.rows);
+  } catch {
+    opusapiAttempted = 0;
+  }
   if (rows.length === 0) return null;
   rows.sort((a, b) => b.used - a.used);
   const best = rows[0];
@@ -916,7 +1075,7 @@ export async function collectClaude(
     email: best.email,
     plan: best.plan,
     windows: best.windows,
-    accounts_total: candidates.length,
+    accounts_total: candidates.length + opusapiAttempted,
     accounts_usable: rows.length,
     accounts: rows.map((row) => ({
       email: row.email,

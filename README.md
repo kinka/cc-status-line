@@ -149,7 +149,9 @@ bun --no-env-file --use-system-ca \
 - Antigravity：`https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
 - Kimi：`https://api.kimi.com/coding/v1/usages`（国内区 `kimi`）/ `https://api.kimi.ai/coding/v1/usages`（国际区 `kimi-ai`、`kimi.ai`）
 
-Claude 是唯一不需要回源的 provider：CPA 已把上游的 `Anthropic-Ratelimit-Unified-*` 响应头缓存在 `/auth-files` 的 `quota.signals` 里，采集器直接读取 `5h`/`7d` 的 `Utilization`（0~1 比例）与 `Reset`（epoch 秒）。
+Claude OAuth 不回源：CPA 已把上游的 `Anthropic-Ratelimit-Unified-*` 响应头缓存在 `/auth-files` 的 `quota.signals` 里，采集器直接读取 `5h`/`7d` 的 `Utilization`（0~1 比例）与 `Reset`（epoch 秒）。
+
+`api-keys.claude` 里 `base-url` 指向 `api.opusapi.xyz` 的 key 额外查一次周额度。采集器读 `/v8/management/config/api-keys/claude` 拿 `auth_index`（不保存 key），再经 `/api-call` 请求 `https://claude.opusapi.xyz/cli/auth/account-status`。`weekly_pct` 是已用百分比，按 7 天窗口写进同一个 `claude` 分组，状态栏仍显示剩余比例。
 
 XAI 响应中没有 `creditUsagePercent` 的账户不会计入额度池。Grok 当前上游只提供 weekly 订阅额度，因此状态栏不会推算或伪造 `5h`。
 

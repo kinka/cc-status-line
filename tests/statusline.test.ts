@@ -224,6 +224,33 @@ describe("rendering", () => {
     expect(gpt).not.toContain("5h:");
   });
 
+  test("renders OpusAPI weekly remaining in the Claude group", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    await writeCache({
+      schema_version: 2,
+      updated_at: now,
+      instances: {
+        "https://cpa.example": {
+          claude: {
+            accounts: [
+              gemQuota("kinka@example.com", 45, 80),
+              {
+                email: "opusapi",
+                windows: [{ seconds: 604800, used: 17, reset_at: now + 6 * 86400 }],
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const output = stripAnsi(
+      await render("https://cpa.example", "claude-opus-5-5", "Opus"),
+    );
+    expect(output).toMatch(/kinka 5h:55%.*7d:20%/);
+    expect(output).toContain("opusapi 7d:83%");
+  });
+
   test("routes Moonshot models to Kimi quota windows", async () => {
     const now = Math.floor(Date.now() / 1000);
     await writeCache({
