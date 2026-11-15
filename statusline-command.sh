@@ -175,6 +175,26 @@ CPQ_CACHE="$CPQ_DIR/cliproxy-quota.json"
 CPQ_COLLECT="$CPQ_DIR/cliproxy-quota.ts"
 CPQ_REFRESH_STAMP="$CPQ_DIR/cliproxy-quota.refresh"
 CPQ_TTL=300          # 缓存超过 5 分钟即后台刷新; stamp 同样按 TTL 节流,避免旧 schema 每次渲染都 spawn
+
+# 自定义服务商名称按会话的 base URL 匹配，与 CPA 额度 provider 路由相互独立。
+# 不显示未配置的 URL，避免意外暴露地址或 URL 中的敏感信息。
+_provider_url=$(printf '%s' "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}" | sed 's:/*$::')
+_provider_alias=""
+if [ -f "$CPQ_DIR/cliproxy-config.json" ]; then
+  _provider_alias=$(jq -r --arg url "$_provider_url" '
+    if (.instances | type) == "object" then
+      [.instances | to_entries[] | select((.key | sub("/*$"; "")) == $url) | .value]
+      | if length == 1 and (.[0] | type) == "object" then .[0].alias else null end
+    else null end
+    | select(type == "string" and (test("[^[:space:]]")) and (test("[[:cntrl:]]") | not))
+  ' "$CPQ_DIR/cliproxy-config.json" 2>/dev/null)
+fi
+provider_str=""
+_provider_tag=""
+if [ -n "$_provider_alias" ]; then
+  provider_str=" ${DIM}(${_provider_alias})${RESET}"
+  _provider_tag="${CYAN}[${_provider_alias}]${RESET}"
+fi
 cliproxy_str=""
 _m=$(printf '%s%s' "$model_id" "$model" | tr 'A-Z' 'a-z')
 # provider: gpt/codex -> codex; grok/xai -> xai; gemini/antigravity -> antigravity; claude -> claude
@@ -259,7 +279,7 @@ EOF
            elif $legacy != "" then .[$legacy].xai else null end).stale // false
         ' "$CPQ_CACHE" 2>/dev/null)
         _st=""; [ "$_stale" = "true" ] && _st="~"
-        cliproxy_str=" ${MUTED}| ${_PLABEL}${_st}${RESET}"
+        cliproxy_str=" ${MUTED}| ${_PLABEL}${_st}${RESET}${_provider_tag}"
       fi
     else
       # codex/antigravity: 去掉池总览,只平铺每个账户自己的 5h + 7d。
@@ -296,16 +316,19 @@ EOF
            elif $legacy != "" then .[$legacy][$p] else null end).stale // false
         ' "$CPQ_CACHE" 2>/dev/null)
         _st=""; [ "$_stale" = "true" ] && _st="~"
-        cliproxy_str=" ${MUTED}| ${_PLABEL}${_st}${RESET}"
+        cliproxy_str=" ${MUTED}| ${_PLABEL}${_st}${RESET}${_provider_tag}"
       fi
     fi
   fi
 fi
 
+# 有账户明细时别名已跟随额度类型；否则在模型旁展示，以便无额度时也能辨认线路。
+[ -n "$cliproxy_detail" ] && provider_str=""
+
 # Compose output: user  path  [git]  model  [time]  ctx | 官方额度 | CLIProxyAPI逐账户额度
 # 账户在终端宽度内保持同一行;超宽时只在账户边界换行,不拆散单个账户的额度窗口。
-_base_line=$(printf "${BOLD}${WHITE}%s${RESET} ${BOLD}${WHITE}%s${RESET}${GREEN}%s${RESET}  ${CYAN}%s${RESET}  [%s]%s%s%s" \
-  "$user" "$display_path" "$git_status_str" "$model" "$time_str" "$ctx_str" "$quota_str" "$cliproxy_str")
+_base_line=$(printf "${BOLD}${WHITE}%s${RESET} ${BOLD}${WHITE}%s${RESET}${GREEN}%s${RESET}  ${CYAN}%s${RESET}%s  [%s]%s%s%s" \
+  "$user" "$display_path" "$git_status_str" "$model" "$provider_str" "$time_str" "$ctx_str" "$quota_str" "$cliproxy_str")
 
 # 优先使用继承的 COLUMNS,否则从控制终端读取;非交互环境回退到 120 列。
 terminal_cols=${COLUMNS:-}

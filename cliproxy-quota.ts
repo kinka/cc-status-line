@@ -268,9 +268,15 @@ function parseConfigObject(value: unknown, source: EffectiveConfig["source"]): E
     if (!isRecord(rawInstance)) throw new Error(`${path}: must be an object`);
     assertKnownFields(
       rawInstance,
-      ["management_key", "management_url", "providers"],
+      ["management_key", "management_url", "providers", "alias"],
       path,
     );
+    if (rawInstance.alias !== undefined && (
+      typeof rawInstance.alias !== "string" || rawInstance.alias.trim() === "" ||
+      /[\x00-\x1f\x7f-\x9f]/.test(rawInstance.alias)
+    )) {
+      throw new Error(`${path}.alias: must be a non-empty string without control characters`);
+    }
     if (
       typeof rawInstance.management_key !== "string" ||
       rawInstance.management_key.trim() === ""

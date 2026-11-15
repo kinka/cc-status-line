@@ -2,6 +2,7 @@
   "version": 1,
   "instances": {
     "http://cpa-a.example:8317": {
+      "alias": "CPA A",
       "management_key": "replace-with-management-key",
       "providers": ["codex", "xai", "antigravity", "claude", "kimi"]
     },

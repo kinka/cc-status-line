@@ -158,6 +158,78 @@ describe("base URL routing", () => {
   });
 });
 
+describe("provider aliases", () => {
+  test("shows the alias for the exact base URL independently of model and quota", async () => {
+    await writeFile(join(claudeDir, "cliproxy-config.json"), JSON.stringify({ instances: {
+      "https://provider-a.example/": { alias: "工作线路" },
+      "https://provider-b.example": { alias: "个人线路" },
+    } }));
+
+    const first = stripAnsi(await render("https://provider-a.example/", "custom-model", "Custom"));
+    const second = stripAnsi(await render("https://provider-b.example", "custom-model", "Custom"));
+    const unknown = stripAnsi(await render("https://provider-a.example.evil", "custom-model", "Custom"));
+    expect(first).toContain("Custom (工作线路)");
+    expect(second).toContain("Custom (个人线路)");
+    expect(unknown).not.toContain("线路");
+    expect(unknown).not.toContain("provider-a.example.evil");
+  });
+
+  test("shows a colored alias after the quota type instead of the model", async () => {
+    await writeFile(join(claudeDir, "cliproxy-config.json"), JSON.stringify({
+      instances: { "https://cpa.example": { alias: "pad" } },
+    }));
+    await writeCache({
+      schema_version: 2,
+      updated_at: Math.floor(Date.now() / 1000),
+      instances: { "https://cpa.example": {
+        antigravity: { accounts: [gemQuota("first@example.com", 10, 20), gemQuota("second@example.com", 30, 40)] },
+        xai: { accounts: [{ email: "grok@example.com", used: 25 }] },
+      } },
+    });
+    const rawGem = await render("https://cpa.example", "gemini", "Gemini");
+    const gem = stripAnsi(rawGem);
+    expect(gem).not.toContain("Gemini (pad)");
+    expect(gem).toContain("| gem[pad]");
+    expect(rawGem).toContain("\u001b[36m[pad]\u001b[0m");
+    expect(gem).toContain("first 5h:90%");
+    expect(gem).toContain("second 5h:70%");
+    const grok = stripAnsi(await render("https://cpa.example", "grok", "Grok"));
+    expect(grok).not.toContain("Grok (pad)");
+    expect(grok).toContain("| grok[pad]");
+    expect(grok).toContain("grok wk:75%");
+  });
+
+  test("uses the official URL when no base URL is set", async () => {
+    await writeFile(join(claudeDir, "cliproxy-config.json"), JSON.stringify({ instances: {
+      "https://api.anthropic.com": { alias: "官方" },
+    } }));
+    expect(stripAnsi(await render("", "claude-opus", "Opus"))).toContain("Opus (官方)");
+  });
+
+  test("ignores invalid config and aliases with control characters", async () => {
+    const path = join(claudeDir, "cliproxy-config.json");
+    await writeFile(path, "{invalid");
+    expect(stripAnsi(await render("https://provider.example", "model", "Model"))).toContain("Model");
+    await writeFile(path, JSON.stringify({ instances: { "https://provider.example": { alias: "unsafe\u001b[31m" } } }));
+    expect(stripAnsi(await render("https://provider.example", "model", "Model"))).not.toContain("unsafe");
+  });
+
+  test("reads aliases from CLAUDE_CONFIG_DIR", async () => {
+    const altDir = await mkdtemp(join(tmpdir(), "cc-statusline-alias-"));
+    try {
+      await writeFile(join(altDir, "cliproxy-config.json"), JSON.stringify({ instances: {
+        "https://provider.example": { alias: "备用配置" },
+      } }));
+      const out = stripAnsi(await render("https://provider.example", "model", "Model", 500, {
+        CLAUDE_CONFIG_DIR: altDir,
+      }));
+      expect(out).toContain("Model (备用配置)");
+    } finally {
+      await rm(altDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("rendering", () => {
   test("wraps only between complete account segments", async () => {
     await writeCache({

@@ -12,6 +12,7 @@ Claude Code 状态栏与 CLIProxyAPI（CPA）多实例、多账户额度展示�
 - Antigravity / Gemini：同时显示 `5h` 与 `7d`。
 - Kimi / Moonshot：同时显示 `5h` 频控与 `7d` 订阅额度（新版比例池优先，旧版计数窗口回退）。
 - Claude / CPA 池（`cc`）：同时显示 `5h` 与 `7d`；走 CPA 代理时 Claude Code 自身不返回 `rate_limits`，官方额度段为空，改由这里展示池内账户额度。
+- 实例自定义别名：根据当前会话的 `ANTHROPIC_BASE_URL` 在额度类型后展示青色名称；没有账户明细时显示在模型旁。
 - 多 CPA 实例：以当前会话的 `ANTHROPIC_BASE_URL` 精确选择实例。
 - 单一配置文件：在一个 JSON 中维护所有 CPA base URL、management key 和 provider allowlist。
 - 多账户：按邮箱 `@` 前缀平铺有效账户；超宽时以账户为单位换行，不拆散同一账户的额度窗口。
@@ -61,6 +62,26 @@ Claude Code 的 `~/.claude/settings.json` 需要包含：
   }
 }
 ```
+
+## 服务商别名
+
+在现有的 `~/.claude/cliproxy-config.json` 中，为对应实例添加 `alias`：
+
+```json
+{
+  "version": 1,
+  "instances": {
+    "https://cpa.example": {
+      "management_key": "replace-with-management-key",
+      "alias": "xfeel"
+    }
+  }
+}
+```
+
+有 CPA 账户额度明细时，状态栏会在额度类型后以青色显示别名，例如 `gpt[xfeel]`；没有账户明细时则显示在模型名后，例如 `Opus (xfeel)`。根据进程继承的 `ANTHROPIC_BASE_URL` 精确匹配，匹配前会去掉地址末尾的 `/`。未设置该变量时使用 `https://api.anthropic.com` 作为匹配键。未配置、无法匹配或配置无效时不显示别名，也不会显示原始地址。采集器要求每个实例均有 management key。
+
+该功能只标识连接的服务地址，不会识别代理内部实际选择的上游账户或 provider，也不影响 CPA 额度路由。同一个地址对应多个服务商时无法仅凭地址区分。如果设置了 `CLAUDE_CONFIG_DIR`，请将文件放在该目录下。
 
 ## 单一 CPA 配置
 

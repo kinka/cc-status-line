@@ -92,6 +92,22 @@ describe("config", () => {
     ]);
   });
 
+  test("accepts and validates provider aliases without changing collection", async () => {
+    const config = {
+      version: 1,
+      instances: { "https://cpa.example": { management_key: "secret", alias: "工作线路" } },
+    };
+    await writeSecure(paths.config, JSON.stringify(config));
+    expect((await loadConfig(paths, false)).instances.size).toBe(1);
+    for (const alias of ["", "\u001b[31m", 123]) {
+      await writeSecure(paths.config, JSON.stringify({
+        ...config,
+        instances: { "https://cpa.example": { management_key: "secret", alias } },
+      }));
+      await expect(loadConfig(paths, false)).rejects.toThrow(".alias");
+    }
+  });
+
   test("rejects unknown providers and insecure permissions", async () => {
     await writeSecure(
       paths.config,
